@@ -178,9 +178,39 @@ def make_sandbox(
     )
 
 
-def print_agent_mode_response(response: bs_models.ExecuteResult):
+def response_status_line(response: bs_models.ExecuteResult) -> str | None:
+    """Return the execution status message, or 'None' if it ended
+    cleanly."""
+    if response.timed_out:
+        seconds = response.timeout_seconds
+        return f"Timed out after {seconds} seconds"
+
     if response.exit_code:
-        print(f"Exited with code: {response.exit_code}")
+        if response.exit_code < 0:
+            return f"Terminated by signal {-response.exit_code}"
+
+        return f"Exited with code: {response.exit_code}"
+
+    return None
+
+
+def response_exit_code(response: bs_models.ExecuteResult) -> int:
+    """Return the CLI exit status."""
+    if response.timed_out:
+        return 1
+
+    exit_code = response.exit_code or 0
+
+    if exit_code < 0:
+        return 128 - exit_code
+
+    return exit_code
+
+
+def print_agent_mode_response(response: bs_models.ExecuteResult):
+    status = response_status_line(response)
+    if status is not None:
+        print(status)
 
     print(response.output, end="")
 
@@ -192,13 +222,30 @@ def print_response(
     response: bs_models.ExecuteResult,
     the_console: rich.console.Console,
 ):
-    if response.exit_code:
-        the_console.print(f"Exited with code: {response.exit_code}")
+    status = response_status_line(response)
+    if status is not None:
+        the_console.print(status)
 
     the_console.print(response.output, end="")
 
     if response.truncated:
         the_console.print("\n<truncated>")
+
+
+def report_response(
+    response: bs_models.ExecuteResult,
+    the_console: rich.console.Console,
+    agent_mode: bool,
+):
+    """Render the response and raise for a nonzero status."""
+    if agent_mode:
+        print_agent_mode_response(response)
+    else:
+        print_response(response, the_console)
+
+    status = response_exit_code(response)
+    if status:
+        raise typer.Exit(code=status)
 
 
 @the_cli.command(
@@ -249,10 +296,7 @@ def execute_python(
             )
         )
 
-    if agent_mode:
-        print_agent_mode_response(response)
-    else:
-        print_response(response, the_console)
+    report_response(response, the_console, agent_mode)
 
 
 # Leave 'exec-script' behind as a hidden backward-compat alias
@@ -297,10 +341,7 @@ def execute(
             )
         )
 
-    if agent_mode:
-        print_agent_mode_response(response)
-    else:
-        print_response(response, the_console)
+    report_response(response, the_console, agent_mode)
 
 
 @the_cli.command(
@@ -343,7 +384,4 @@ def exec_command(
             )
         )
 
-    if agent_mode:
-        print_agent_mode_response(response)
-    else:
-        print_response(response, the_console)
+    report_response(response, the_console, agent_mode)

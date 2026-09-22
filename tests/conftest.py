@@ -30,7 +30,8 @@ def bare_environment(sandbox_config):
 
     settings_env_path = sandbox_config.environments_path
     settings_bare_path = settings_env_path / "bare"
-    shutil.copytree(bare_path, settings_bare_path)
+    # Preserve interpreter symlinks when relocating the venv.
+    shutil.copytree(bare_path, settings_bare_path, symlinks=True)
 
     yield settings_bare_path
 

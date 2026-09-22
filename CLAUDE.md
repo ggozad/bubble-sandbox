@@ -43,10 +43,14 @@ This package is a thin Python driver around [`bubblewrap`](https://github.com/co
 
 1. `core_sandbox_args()` — always-on flags: read-only binds of `/usr`, `/lib`, `/lib64` (if present), and `sys.base_prefix` (when not `/usr`); `/bin` and `/sbin` symlinks; fresh `/proc`, `/dev`, tmpfs `/tmp`; `--unshare-user`, `--unshare-pid`, `--unshare-net` (unless `network=True`), `--new-session`, `--die-with-parent`.
 2. `venv_sandbox_args(env_name, config)` — resolves `environments/<env_name>/.venv` and bind-mounts it read-only at `/sandbox/venv`; sets `PATH=/sandbox/venv/bin:/usr/bin:/bin`.
-3. `workdir_sandbox_args(workdir)` — if a host workdir is given, bind-mounts it **read-write** at `/sandbox/work` and `--chdir`s into it. `execute_script` allocates a `TemporaryDirectory` workdir when none is provided and writes `script.py` into it.
+3. `workdir_sandbox_args(workdir)` — if a host workdir is given, bind-mounts it **read-write** at `/sandbox/work` and `--chdir`s into it. `execute_python` allocates a `TemporaryDirectory` workdir when none is provided, and writes the script to `script_path` within it (`script.py` by default).
 4. `volumes_sandbox_args(volume_map)` — for each `VolumeInfo`: bind-mount at `/sandbox/volumes/<name>` (rw or ro based on `writable`), or create an empty dir when `host_path` is `None`.
 
-`BwrapSandbox.execute` runs the resulting argv via `asyncio.create_subprocess_exec`, enforces `config.execution_timeout_seconds` with `asyncio.wait_for` (returns `exit_code=-1` on timeout), decodes stdout+stderr, and truncates to `config.max_output_chars`. `execute_python` is just a wrapper that writes the script to the workdir and invokes `/sandbox/venv/bin/python /sandbox/work/script.py`. `execute_script` is kept as a backward-compat alias for `execute_python`.
+`BwrapSandbox.execute` runs the resulting argv via `asyncio.create_subprocess_exec` and enforces `config.execution_timeout_seconds` with `asyncio.wait_for`. It returns an `ExecuteResult` carrying `stdout` and `stderr` separately, each truncated to `config.max_output_chars`, which the result also reports; `output` is a property concatenating the two. A timeout sets `timed_out` and leaves `exit_code` as `None`. `execute_python` writes the script to the workdir and invokes it under `/sandbox/work`. `execute_script` is kept as a backward-compat alias for `execute_python`.
+
+### The script write must not follow links out of the workdir
+
+`execute_python` writes scripts from the host into an attacker-writable workdir. `write_script` opens each parent directory relative to its predecessor without following links, writes a new regular file, and atomically replaces the target name. Script paths must be relative and cannot contain `..`; `InvalidScriptPath` reports one that is not.
 
 ### Environments are separate uv projects
 

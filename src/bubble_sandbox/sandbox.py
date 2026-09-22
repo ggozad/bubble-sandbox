@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
 import dataclasses
+import os
 import pathlib
 import sys
 import tempfile
+import uuid
 
 from bubble_sandbox import config as bs_config
 from bubble_sandbox import models as bs_models
@@ -11,6 +13,18 @@ from bubble_sandbox import models as bs_models
 _SYS_BASE_PREFIX = sys.base_prefix
 
 _MAX_OUTPUT_CHARS = 100_000
+
+# Bubblewrap execution is Linux-only; Windows lacks these flags.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _truncate(text: str, limit: int) -> tuple[str, bool]:
+    """Return 'text' capped at 'limit', and whether it was cut."""
+    if len(text) > limit:
+        return text[:limit], True
+
+    return text, False
 
 
 def _extant_ro_binds(*paths: str) -> list[str]:
@@ -204,6 +218,115 @@ def volumes_sandbox_args(volume_map: bs_models.VolumeMap) -> list[str]:
     return result
 
 
+DEFAULT_SCRIPT_PATH = "script.py"
+
+
+class InvalidScriptPath(ValueError):
+    def __init__(self, script_path, reason):
+        self.script_path = script_path
+        self.reason = reason
+        super().__init__(f"Invalid script path {script_path!r}: {reason}")
+
+
+def _script_path_parts(script_path: str) -> tuple[str, ...]:
+    """Return validated components of a relative script path."""
+    pure = pathlib.PurePosixPath(script_path)
+    windows = pathlib.PureWindowsPath(script_path)
+
+    if pure.is_absolute() or windows.is_absolute():
+        raise InvalidScriptPath(script_path, "must be relative to the workdir")
+
+    parts = tuple(part for part in pure.parts if part != ".")
+
+    if not parts:
+        raise InvalidScriptPath(script_path, "names no file")
+
+    if ".." in parts:
+        raise InvalidScriptPath(script_path, "must not contain '..'")
+
+    return parts
+
+
+def _write_and_replace(
+    dir_fd: int,
+    name: str,
+    script: str,
+    script_path: str,
+) -> None:
+    """Atomically replace 'name' with a newly created file in 'dir_fd'."""
+    temporary = f".{uuid.uuid4().hex}.tmp"
+
+    try:
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            0o600,
+            dir_fd=dir_fd,
+        )
+    except OSError as exc:
+        raise InvalidScriptPath(
+            script_path,
+            "could not be written inside the workdir",
+        ) from exc
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as script_file:
+            script_file.write(script)
+
+        os.replace(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:  # EISDIR when a directory holds the name
+        raise InvalidScriptPath(
+            script_path,
+            f"{name!r} cannot be replaced inside the workdir",
+        ) from exc
+    finally:
+        # A successful replacement has already removed the temporary name.
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=dir_fd)
+
+
+def write_script(
+    workdir: pathlib.Path,
+    script_path: str,
+    script: str,
+) -> pathlib.PurePosixPath:
+    """Atomically write 'script_path' below 'workdir', following no links.
+
+    Returns the path written, relative to 'workdir'.
+    """
+    parts = _script_path_parts(script_path)
+    dir_fd = os.open(workdir, os.O_RDONLY | _O_DIRECTORY | os.O_CLOEXEC)
+    opened = [dir_fd]
+
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=dir_fd)
+            except FileExistsError:
+                pass
+
+            try:
+                dir_fd = os.open(
+                    part,
+                    os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:  # ELOOP / ENOTDIR for a symlinked parent
+                raise InvalidScriptPath(
+                    script_path,
+                    f"{part!r} is not a directory inside the workdir",
+                ) from exc
+
+            opened.append(dir_fd)
+
+        _write_and_replace(dir_fd, parts[-1], script, script_path)
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+    return pathlib.PurePosixPath(*parts)
+
+
 @dataclasses.dataclass(kw_only=True)
 class BwrapSandbox:
     default_environment: str
@@ -243,11 +366,13 @@ class BwrapSandbox:
         script: str,
         environment_name: str = None,
         workdir: pathlib.Path | str = None,
+        script_path: str = DEFAULT_SCRIPT_PATH,
         timeout: float = None,  # seconds
         extra_volumes: bs_models.VolumeMap = None,
         extra_args: list[str] = None,
     ) -> bs_models.ExecuteResult:
-
+        """Execute 'script', stored at 'script_path' relative to the
+        workdir."""
         if workdir is None:
             workdir_context = tempfile.TemporaryDirectory(
                 ignore_cleanup_errors=True,
@@ -258,13 +383,12 @@ class BwrapSandbox:
         with workdir_context as workdir_str:
             workdir_path = pathlib.Path(workdir_str)
 
-            script_path = workdir_path / "script.py"
-            script_path.write_text(script, encoding="utf-8")
+            written = write_script(workdir_path, script_path, script)
 
             return await self.execute(
                 command=[
                     "/sandbox/venv/bin/python",
-                    "/sandbox/work/script.py",
+                    str(pathlib.PurePosixPath("/sandbox/work") / written),
                 ],
                 environment_name=environment_name,
                 workdir=workdir_path,
@@ -303,6 +427,8 @@ class BwrapSandbox:
             stderr=asyncio.subprocess.PIPE,
         )
 
+        max_output_chars = self.config.max_output_chars
+
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
@@ -312,20 +438,25 @@ class BwrapSandbox:
             proc.kill()
             await proc.wait()
             return bs_models.ExecuteResult(
-                output="Execution timed out",
-                exit_code=-1,
+                timed_out=True,
+                timeout_seconds=timeout,
+                max_output_chars=max_output_chars,
             )
 
-        stdout = stdout.decode("utf-8", errors="replace")
-        stderr = stderr.decode("utf-8", errors="replace")
-        output = stdout + stderr
-        truncated = len(output) > self.config.max_output_chars
-
-        if truncated:
-            output = output[: self.config.max_output_chars]
+        stdout, out_cut = _truncate(
+            stdout.decode("utf-8", errors="replace"),
+            max_output_chars,
+        )
+        stderr, err_cut = _truncate(
+            stderr.decode("utf-8", errors="replace"),
+            max_output_chars,
+        )
 
         return bs_models.ExecuteResult(
-            output=output,
+            stdout=stdout,
+            stderr=stderr,
             exit_code=proc.returncode or 0,
-            truncated=truncated,
+            truncated=out_cut or err_cut,
+            max_output_chars=max_output_chars,
+            timeout_seconds=timeout,
         )
