@@ -20,11 +20,31 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 def _truncate(text: str, limit: int) -> tuple[str, bool]:
-    """Return 'text' capped at 'limit', and whether it was cut."""
-    if len(text) > limit:
-        return text[:limit], True
+    """Return 'text' capped at 'limit', and whether it was cut.
 
-    return text, False
+    The middle is replaced by a marker counting what was dropped, so both
+    the start of a stream and its end (where a traceback is) survive.
+    """
+    if len(text) <= limit:
+        return text, False
+
+    omitted = len(text) - limit
+
+    while True:
+        marker = f"\n[... {omitted} characters omitted ...]\n"
+        kept = limit - len(marker)
+
+        if kept <= 0:
+            return text[:limit], True
+
+        if len(text) - kept == omitted:
+            break
+
+        # The marker's own length grew the count; recount with it.
+        omitted = len(text) - kept
+
+    head = kept // 2
+    return text[:head] + marker + text[len(text) - (kept - head) :], True
 
 
 def _extant_ro_binds(*paths: str) -> list[str]:

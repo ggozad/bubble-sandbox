@@ -53,11 +53,11 @@ class ExecuteResult(pydantic.BaseModel):
 
       'stdout'
         What the execution wrote to stdout, truncated to
-        'max_output_chars'.
+        'max_output_chars' by replacing its middle with a marker.
 
       'stderr'
-        What it wrote to stderr, truncated to 'max_output_chars'.  The
-        limit applies to each stream separately.
+        What it wrote to stderr, truncated the same way.  The limit
+        applies to each stream separately.
 
       'output'
         'stdout' and 'stderr' concatenated.
@@ -79,6 +79,9 @@ class ExecuteResult(pydantic.BaseModel):
       'timeout_seconds'
         The limit that was applied, whether or not it was hit.
     """
+
+    # An unknown field is an error, not something to drop silently.
+    model_config = pydantic.ConfigDict(extra="forbid")
 
     stdout: str = ""
     stderr: str = ""

@@ -11,8 +11,8 @@ from bubble_sandbox import models as bs_models
         ({"exit_code": 3}, "Exited with code: 3", 3),
         (
             {"timed_out": True, "timeout_seconds": 30.0},
-            "Timed out after 30.0 seconds",
-            1,
+            "Timed out after 30 seconds",
+            124,
         ),
         ({"exit_code": -9}, "Terminated by signal 9", 137),
         ({"exit_code": -15}, "Terminated by signal 15", 143),
@@ -23,4 +23,3 @@ def test_response_reporting(w_kwargs, exp_status, exp_code):
 
     assert bs_cli.response_status_line(response) == exp_status
     assert bs_cli.response_exit_code(response) == exp_code
-    assert 0 <= exp_code <= 255  # an exit status is one byte

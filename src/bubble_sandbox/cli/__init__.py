@@ -182,8 +182,7 @@ def response_status_line(response: bs_models.ExecuteResult) -> str | None:
     """Return the execution status message, or 'None' if it ended
     cleanly."""
     if response.timed_out:
-        seconds = response.timeout_seconds
-        return f"Timed out after {seconds} seconds"
+        return f"Timed out after {response.timeout_seconds:g} seconds"
 
     if response.exit_code:
         if response.exit_code < 0:
@@ -197,7 +196,7 @@ def response_status_line(response: bs_models.ExecuteResult) -> str | None:
 def response_exit_code(response: bs_models.ExecuteResult) -> int:
     """Return the CLI exit status."""
     if response.timed_out:
-        return 1
+        return 124  # as 'timeout(1)' reports one
 
     exit_code = response.exit_code or 0
 

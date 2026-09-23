@@ -570,7 +570,7 @@ async def test_bwrapsandboxcommand_execute_python_w_truncation(
     )
 
     found = await sandbox.execute_python(script=script, workdir=workdir)
-    exp_output = MUST_TRUNCATE[:50].decode("ascii")
+    exp_output = "X" * 8 + "\n[... 83 characters omitted ...]\n" + "X" * 9
 
     assert isinstance(found, bs_models.ExecuteResult)
     assert found.output == exp_output
@@ -796,7 +796,7 @@ async def test_bwrapsandboxcommand_execute_w_truncation(
     )
 
     found = await sandbox.execute(command=command, workdir=workdir)
-    exp_output = MUST_TRUNCATE[:50].decode("ascii")
+    exp_output = "X" * 8 + "\n[... 83 characters omitted ...]\n" + "X" * 9
 
     assert isinstance(found, bs_models.ExecuteResult)
     assert found.output == exp_output
@@ -1246,3 +1246,35 @@ def test_write_script_removes_temporary_on_a_failed_write(tmp_path):
         bs_sandbox.write_script(workdir, "script.py", "bad: \udc80")
 
     assert list(workdir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "w_text, w_limit, exp_text, exp_cut",
+    [
+        ("X" * 50, 50, "X" * 50, False),
+        (
+            "A" * 50 + "Z" * 50,
+            50,
+            "A" * 8 + "\n[... 83 characters omitted ...]\n" + "Z" * 9,
+            True,
+        ),
+        # No room for the marker: keep the beginning.
+        ("X" * 20, 5, "X" * 5, True),
+    ],
+)
+def test_truncate(w_text, w_limit, exp_text, exp_cut):
+    found, cut = bs_sandbox._truncate(w_text, w_limit)
+
+    assert found == exp_text
+    assert cut is exp_cut
+    assert len(found) <= w_limit
+
+
+def test_truncate_counts_omission_after_marker_grows():
+    # 1000 over the limit before the marker, so the count needs 4 digits.
+    text = "X" * 1_100
+
+    found, _ = bs_sandbox._truncate(text, 100)
+
+    assert len(found) == 100
+    assert "[... 1035 characters omitted ...]" in found
